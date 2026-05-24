@@ -2,12 +2,18 @@ import "dotenv/config"
 import { Bot, InlineKeyboard, InputFile } from "grammy"
 import { exec } from "node:child_process"
 import { promisify } from "node:util"
+import { dirname, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
+import { existsSync } from "node:fs"
 import { getClient } from "./opencode-client.js"
 import { getOrCreateSession, getSession, deleteSession, setSession } from "./session-store.js"
 import { streamResponse, activeRequests } from "./stream-handler.js"
 import { getUserSettings, setUserModel } from "./user-store.js"
 
 const execAsync = promisify(exec)
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const PROJECT_ROOT = resolve(__dirname, "..")
 
 const token = process.env.TELEGRAM_BOT_TOKEN
 if (!token) {
@@ -17,17 +23,43 @@ if (!token) {
 
 const bot = new Bot(token)
 
-// Middleware для ограничения доступа
+// Middleware для ограничения доступа.
+// Поведение по умолчанию — fail-closed: пустой список = доступа нет ни у кого.
+// Чтобы намеренно открыть бот всем, установите TELEGRAM_ALLOW_ALL=true.
 const ALLOWED_USERS = (process.env.TELEGRAM_ALLOWED_USERS || "")
   .split(",")
   .map(id => id.trim())
   .filter(id => id.length > 0)
+const ALLOW_ALL = String(process.env.TELEGRAM_ALLOW_ALL || "").toLowerCase() === "true"
 
+if (ALLOWED_USERS.length === 0 && !ALLOW_ALL) {
+  console.warn(
+    "⚠️  TELEGRAM_ALLOWED_USERS пуст и TELEGRAM_ALLOW_ALL не установлен.\n" +
+    "   Бот будет отвергать всех пользователей (fail-closed).\n" +
+    "   Укажите user ID через TELEGRAM_ALLOWED_USERS=123,456 или явно установите TELEGRAM_ALLOW_ALL=true."
+  )
+}
+if (ALLOW_ALL && ALLOWED_USERS.length === 0) {
+  console.warn("⚠️  TELEGRAM_ALLOW_ALL=true — бот открыт для всех пользователей!")
+}
+
+// Ограничиваем работу только приватными чатами и валидным ctx.chat.
 bot.use(async (ctx, next) => {
-  const userId = String(ctx.from?.id)
-  if (ALLOWED_USERS.length > 0 && !ALLOWED_USERS.includes(userId)) {
-    console.warn(`Заблокирована попытка доступа от пользователя: ${userId}`)
-    await ctx.reply("⛔ У вас нет доступа к этому боту.")
+  if (!ctx.chat?.id || ctx.chat.type !== "private") {
+    return
+  }
+  const userId = ctx.from?.id != null ? String(ctx.from.id) : null
+  if (!userId) return
+
+  if (ALLOWED_USERS.length > 0) {
+    if (!ALLOWED_USERS.includes(userId)) {
+      console.warn(`Заблокирована попытка доступа от пользователя: ${userId}`)
+      await ctx.reply("⛔ У вас нет доступа к этому боту.").catch(() => {})
+      return
+    }
+  } else if (!ALLOW_ALL) {
+    console.warn(`Fail-closed: отклонён доступ от пользователя ${userId} (TELEGRAM_ALLOWED_USERS пуст).`)
+    await ctx.reply("⛔ Бот не настроен. Обратитесь к администратору.").catch(() => {})
     return
   }
   await next()
@@ -84,6 +116,21 @@ function getActiveModel(chatId) {
   return `${provider}/${modelId}`
 }
 
+// Достаёт идентификатор модели из последнего ассистентского сообщения сессии,
+// чтобы /session мог показать модель, которой реально пользуется сессия.
+function extractSessionModel(messages) {
+  if (!Array.isArray(messages)) return null
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const info = messages[i]?.info || messages[i]
+    if (!info || info.role && info.role !== "assistant") continue
+    const provider = info.providerID || info.provider || info.model?.providerID
+    const modelId = info.modelID || info.model || info.model?.modelID
+    if (provider && modelId) return `${provider}/${modelId}`
+    if (modelId) return String(modelId)
+  }
+  return null
+}
+
 bot.command("start", async (ctx) => {
   const chatId = String(ctx.chat.id)
   const modelStr = getActiveModel(chatId)
@@ -130,9 +177,10 @@ bot.command("stop", async (ctx) => {
   const sess = getSession(chatId)
   if (!sess) return ctx.reply("❌ Нет активной сессии.")
 
-  const controller = activeRequests.get(sess.sessionId)
-  if (controller) {
-    controller.abort()
+  const controllers = activeRequests.get(sess.sessionId)
+  if (controllers) {
+    controllers.promptController?.abort()
+    controllers.sseController?.abort()
     await ctx.reply("🛑 Запрос на остановку отправлен.")
   } else {
     await ctx.reply("ℹ️ Сейчас нет активных запросов для этой сессии.")
@@ -141,17 +189,64 @@ bot.command("stop", async (ctx) => {
 
 bot.command("danger", async (ctx) => {
   const mode = ctx.match?.trim().toLowerCase()
-  const scriptPath = "D:\\www\\ai\\remote_ai\\start-bot.ps1"
 
-  if (mode === "on") {
-    await ctx.reply("🚀 Включаю режим авто-подтверждения. Бот и сервер будут перезагружены...")
-    exec(`powershell.exe -Command "Start-Process powershell.exe -ArgumentList '-NoProfile', '-File', '${scriptPath}', '-SkipPermissions' -WindowStyle Hidden"`)
-  } else if (mode === "off") {
-    await ctx.reply("🛡 Выключаю режим авто-подтверждения. Бот и сервер будут перезагружены...")
-    exec(`powershell.exe -Command "Start-Process powershell.exe -ArgumentList '-NoProfile', '-File', '${scriptPath}' -WindowStyle Hidden"`)
-  } else {
-    await ctx.reply("Укажите режим: `/danger on` или `/danger off`\n\nВнимание: это приведет к полной перезагрузке бота и сервера.", { parse_mode: "Markdown" })
+  if (mode !== "on" && mode !== "off") {
+    await ctx.reply(
+      "Укажите режим: <code>/danger on</code> или <code>/danger off</code>\n\n" +
+      "Внимание: это приведет к полной перезагрузке бота и сервера.",
+      { parse_mode: "HTML" }
+    )
+    return
   }
+
+  // Если бот запущен через супервизор (scripts/start.js) — сигналим ему через файл-флаг и выходим.
+  // Супервизор перезапустит связку с/без --dangerously-skip-permissions.
+  const supervisorPid = process.env.OPENCODE_SUPERVISOR_PID
+  const flagPath = resolve(PROJECT_ROOT, "data", "danger.flag")
+  if (supervisorPid) {
+    try {
+      const { writeFileSync, mkdirSync } = await import("node:fs")
+      mkdirSync(dirname(flagPath), { recursive: true })
+      writeFileSync(flagPath, mode)
+      await ctx.reply(
+        mode === "on"
+          ? "🚀 Включаю режим авто-подтверждения. Бот и сервер будут перезагружены..."
+          : "🛡 Выключаю режим авто-подтверждения. Бот и сервер будут перезагружены..."
+      )
+      // Даём Telegram доставить сообщение и выходим — супервизор подхватит флаг.
+      setTimeout(() => process.exit(0), 500)
+      return
+    } catch (err) {
+      console.error("Не удалось записать флаг для супервизора:", err.message)
+    }
+  }
+
+  // Fallback на Windows-only flow через PowerShell-скрипт.
+  const psScriptPath = resolve(PROJECT_ROOT, "start-bot.ps1")
+  if (!existsSync(psScriptPath) || process.platform !== "win32") {
+    await ctx.reply(
+      "❌ /danger требует запуска через супервизор (scripts/start.js) или PowerShell-скрипт start-bot.ps1 (Windows).\n" +
+      "Запустите бот через <code>npm start</code> для поддержки переключения режима.",
+      { parse_mode: "HTML" }
+    )
+    return
+  }
+
+  const psArgs = mode === "on"
+    ? ["-NoProfile", "-File", psScriptPath, "-SkipPermissions"]
+    : ["-NoProfile", "-File", psScriptPath]
+  const cp = await import("node:child_process")
+  cp.spawn("powershell.exe", ["-Command",
+    "Start-Process", "powershell.exe",
+    "-ArgumentList", psArgs.map(a => `'${a.replace(/'/g, "''")}'`).join(","),
+    "-WindowStyle", "Hidden",
+  ], { detached: true, stdio: "ignore" }).unref()
+
+  await ctx.reply(
+    mode === "on"
+      ? "🚀 Включаю режим авто-подтверждения. Бот и сервер будут перезагружены..."
+      : "🛡 Выключаю режим авто-подтверждения. Бот и сервер будут перезагружены..."
+  )
 })
 
 bot.command("projects", async (ctx) => {
@@ -165,14 +260,14 @@ bot.command("projects", async (ctx) => {
       return ctx.reply("Список проектов пуст.")
     }
 
+    const visibleProjects = projects.filter(p => p.id !== "global")
     let text = "📁 <b>Доступные проекты:</b>\n\n"
-    for (let i = 0; i < projects.length; i++) {
-      const p = projects[i]
-      if (p.id === "global") continue
-      text += `${i + 1}. <b>${p.worktree.split(/[\\/]/).pop()}</b>\n`
+    visibleProjects.forEach((p, i) => {
+      const name = (p.worktree || "").split(/[\\/]/).pop() || p.id
+      text += `${i + 1}. <b>${name}</b>\n`
       text += `🆔 <code>${p.id}</code>\n`
-      text += `📍 <code>${p.worktree}</code>\n\n`
-    }
+      text += `📍 <code>${p.worktree || ""}</code>\n\n`
+    })
 
     text += "Чтобы начать работу в проекте, переключитесь на одну из его сессий через /sessions и /switch."
     await ctx.reply(text, { parse_mode: "HTML" })
@@ -302,14 +397,20 @@ bot.command("session", async (ctx) => {
       c.project.current()
     ])
     
-    const modelStr = getActiveModel(chatId)
+    const userModelStr = getActiveModel(chatId)
+    const sessionModelStr = extractSessionModel(msgs?.data) || extractSessionModel([{ info: info?.data }])
     const pwd = info?.data?.directory || project?.data?.worktree || "Неизвестно"
     const summary = info?.data?.summary || {}
     const title = info?.data?.title || info?.data?.slug || "Без названия"
-    
+
     // Check if auto-confirm is active on server
     const isDanger = process.env.OPENCODE_SERVER_ARGS?.includes("--dangerously-skip-permissions") || false
     const dangerStatus = isDanger ? "🚀 ON (авто-подтверждение)" : "🛡 OFF (безопасно)"
+
+    const modelLine = sessionModelStr && sessionModelStr !== userModelStr
+      ? `🤖 <b>Модель пользователя:</b> ${userModelStr}\n` +
+        `🧠 <b>Модель последнего ответа:</b> ${sessionModelStr}\n`
+      : `🤖 <b>Модель:</b> ${userModelStr}\n`
 
     await ctx.reply(
       `📋 <b>Инфо о сессии:</b>\n\n` +
@@ -317,7 +418,7 @@ bot.command("session", async (ctx) => {
       `📝 <b>Заголовок:</b> ${title}\n` +
       `💬 <b>Сообщений:</b> ${msgs?.data?.length || 0}\n` +
       `🛠 <b>Правки:</b> +${summary.additions || 0} / -${summary.deletions || 0} (${summary.files || 0} файлов)\n` +
-      `🤖 <b>Модель:</b> ${modelStr}\n` +
+      modelLine +
       `📁 <b>Папка:</b> <code>${pwd}</code>\n` +
       `⚡ <b>Режим подтверждений:</b> ${dangerStatus}\n` +
       `🕒 <b>Обновлена:</b> ${new Date(info?.data?.time?.updated || info?.data?.time?.created).toLocaleString("ru-RU")}`,
@@ -351,20 +452,28 @@ bot.command("sessions", async (ctx) => {
 
     sessions.sort((a, b) => (b.time?.updated || 0) - (a.time?.updated || 0))
 
-    let text = "📋 <b>Доступные сессии:</b>\n\n"
-    const topSessions = sessions.slice(0, 15)
-    
-    for (let i = 0; i < topSessions.length; i++) {
-      const s = topSessions[i]
+    const LIMIT = 15
+    const currentSessionId = getSession(chatId)?.sessionId || null
+    let topSessions = sessions.slice(0, LIMIT)
+
+    // Если активная сессия не попала в топ — добавляем её в начало списка.
+    if (currentSessionId && !topSessions.some(s => s.id === currentSessionId)) {
+      const current = sessions.find(s => s.id === currentSessionId)
+      if (current) topSessions = [current, ...topSessions].slice(0, LIMIT)
+    }
+
+    let text = `📋 <b>Доступные сессии</b> (показано ${topSessions.length} из ${sessions.length}):\n\n`
+
+    topSessions.forEach((s, i) => {
       const ts = s.time?.updated || s.time?.created
       const date = ts ? new Date(ts).toLocaleString("ru-RU") : "Неизвестно"
-      const currentIndicator = getSession(chatId)?.sessionId === s.id ? " 🟢 (текущая)" : ""
-      
+      const currentIndicator = currentSessionId === s.id ? " 🟢 (текущая)" : ""
+
       text += `${i + 1}. <code>${s.id}</code>${currentIndicator}\n`
       text += `📝 Имя: ${s.title || s.slug || "Без имени"}\n`
       text += `📁 Папка: <code>${s.directory || "Неизвестно"}</code>\n`
       text += `⏱ Обновлена: ${date}\n\n`
-    }
+    })
 
     text += "Чтобы переключиться на нужную сессию, введите:\n<code>/switch &lt;ID_СЕССИИ&gt;</code>"
     await ctx.reply(text, { parse_mode: "HTML" })
