@@ -1,13 +1,15 @@
 import { getClient } from "./opencode-client.js"
 import { splitMessage } from "./message-formatter.js"
+import { getUserSettings } from "./user-store.js"
 
 const THROTTLE_MS = 300
 const SSE_TIMEOUT_MS = 120000
 
 export async function streamResponse(chatId, sessionId, prompt, bot) {
   const client = getClient()
-  const provider = process.env.DEFAULT_MODEL_PROVIDER || "opencode"
-  const modelId = process.env.DEFAULT_MODEL_ID || "big-pickle"
+  const userSettings = getUserSettings(chatId)
+  const provider = userSettings.provider || process.env.DEFAULT_MODEL_PROVIDER || "opencode"
+  const modelId = userSettings.modelId || process.env.DEFAULT_MODEL_ID || "big-pickle"
 
   const sentMsg = await bot.api.sendMessage(chatId, "⏳ печатает...")
 
