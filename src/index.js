@@ -17,6 +17,22 @@ if (!token) {
 
 const bot = new Bot(token)
 
+// Middleware для ограничения доступа
+const ALLOWED_USERS = (process.env.TELEGRAM_ALLOWED_USERS || "")
+  .split(",")
+  .map(id => id.trim())
+  .filter(id => id.length > 0)
+
+bot.use(async (ctx, next) => {
+  const userId = String(ctx.from?.id)
+  if (ALLOWED_USERS.length > 0 && !ALLOWED_USERS.includes(userId)) {
+    console.warn(`Заблокирована попытка доступа от пользователя: ${userId}`)
+    await ctx.reply("⛔ У вас нет доступа к этому боту.")
+    return
+  }
+  await next()
+})
+
 let client = null
 function ensureClient() {
   if (!client) {
