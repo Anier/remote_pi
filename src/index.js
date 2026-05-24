@@ -43,7 +43,7 @@ bot.command("start", async (ctx) => {
   await ctx.reply(
     "🤖 OpenCode Telegram Bot\n\n" +
     "• /code <запрос> — задать вопрос ИИ\n" +
-    "• /new — новый диалог (сброс контекста)\n" +
+    "• /new [имя] — новый диалог (с опциональным именем)\n" +
     "• /model <provider/model> — сменить модель\n" +
     "• /models — список доступных моделей\n" +
     "• /session — информация о текущей сессии\n" +
@@ -60,7 +60,7 @@ bot.command("help", async (ctx) => {
   await ctx.reply(
     "📋 Команды:\n" +
     "/code <запрос> — отправить запрос\n" +
-    "/new — начать новый диалог\n" +
+    "/new [имя] — начать новый диалог (можно задать имя)\n" +
     "/model <provider/model> — сменить модель\n" +
     "/models — список доступных моделей\n" +
     "/session — текущая сессия\n" +
@@ -138,8 +138,26 @@ bot.command("code", async (ctx) => {
 
 bot.command("new", async (ctx) => {
   const chatId = String(ctx.chat.id)
-  deleteSession(chatId)
-  await ctx.reply("✅ Начат новый диалог (контекст сброшен)")
+  const title = ctx.match?.trim()
+
+  try {
+    if (title) {
+      const c = ensureClient()
+      const session = await c.session.create({
+        body: { title: title }
+      })
+      if (!session?.data?.id) {
+        throw new Error("Не удалось создать сессию: нет id в ответе")
+      }
+      setSession(chatId, session.data.id)
+      await ctx.reply(`✅ Начат новый диалог с именем: <b>${title}</b>\n(контекст сброшен)`, { parse_mode: "HTML" })
+    } else {
+      deleteSession(chatId)
+      await ctx.reply("✅ Начат новый диалог (контекст сброшен)")
+    }
+  } catch (err) {
+    await ctx.reply(`❌ Ошибка при создании сессии: ${err.message}`)
+  }
 })
 
 bot.command("session", async (ctx) => {
