@@ -23,43 +23,42 @@ if (!token) {
 
 const bot = new Bot(token)
 
-// Middleware для ограничения доступа.
-// Поведение по умолчанию — fail-closed: пустой список = доступа нет ни у кого.
-// Чтобы намеренно открыть бот всем, установите TELEGRAM_ALLOW_ALL=true.
+// Список разрешённых user ID. Пустой список = доступ открыт всем (для совместимости).
+// Чтобы ограничить доступ — задайте TELEGRAM_ALLOWED_USERS=123,456 в .env.
 const ALLOWED_USERS = (process.env.TELEGRAM_ALLOWED_USERS || "")
   .split(",")
   .map(id => id.trim())
   .filter(id => id.length > 0)
-const ALLOW_ALL = String(process.env.TELEGRAM_ALLOW_ALL || "").toLowerCase() === "true"
+const DEBUG_UPDATES = String(process.env.DEBUG_UPDATES || "").toLowerCase() === "true"
 
-if (ALLOWED_USERS.length === 0 && !ALLOW_ALL) {
+if (ALLOWED_USERS.length === 0) {
   console.warn(
-    "⚠️  TELEGRAM_ALLOWED_USERS пуст и TELEGRAM_ALLOW_ALL не установлен.\n" +
-    "   Бот будет отвергать всех пользователей (fail-closed).\n" +
-    "   Укажите user ID через TELEGRAM_ALLOWED_USERS=123,456 или явно установите TELEGRAM_ALLOW_ALL=true."
+    "⚠️  TELEGRAM_ALLOWED_USERS не задан — бот ОТКРЫТ для всех пользователей.\n" +
+    "   Для ограничения доступа укажите user ID через TELEGRAM_ALLOWED_USERS=123,456 в .env."
   )
-}
-if (ALLOW_ALL && ALLOWED_USERS.length === 0) {
-  console.warn("⚠️  TELEGRAM_ALLOW_ALL=true — бот открыт для всех пользователей!")
+} else {
+  console.log(`🔐 Разрешённые пользователи: ${ALLOWED_USERS.join(", ")}`)
 }
 
-// Ограничиваем работу только приватными чатами и валидным ctx.chat.
+// Лог входящих апдейтов — помогает понять, что Telegram реально доставляет сообщения.
 bot.use(async (ctx, next) => {
-  if (!ctx.chat?.id || ctx.chat.type !== "private") {
-    return
+  const chatId = ctx.chat?.id
+  const userId = ctx.from?.id
+  const text = ctx.message?.text || ctx.update?.message?.text || ""
+  if (DEBUG_UPDATES) {
+    console.log(`[update] type=${ctx.update?.message ? "message" : Object.keys(ctx.update || {}).join(",")} chat=${chatId} user=${userId} text=${JSON.stringify(text).slice(0, 200)}`)
+  } else if (text) {
+    console.log(`[update] from=${userId} chat=${chatId}: ${text.slice(0, 120)}`)
   }
-  const userId = ctx.from?.id != null ? String(ctx.from.id) : null
-  if (!userId) return
+  await next()
+})
 
-  if (ALLOWED_USERS.length > 0) {
-    if (!ALLOWED_USERS.includes(userId)) {
-      console.warn(`Заблокирована попытка доступа от пользователя: ${userId}`)
-      await ctx.reply("⛔ У вас нет доступа к этому боту.").catch(() => {})
-      return
-    }
-  } else if (!ALLOW_ALL) {
-    console.warn(`Fail-closed: отклонён доступ от пользователя ${userId} (TELEGRAM_ALLOWED_USERS пуст).`)
-    await ctx.reply("⛔ Бот не настроен. Обратитесь к администратору.").catch(() => {})
+// Middleware для ограничения доступа.
+bot.use(async (ctx, next) => {
+  const userId = ctx.from?.id != null ? String(ctx.from.id) : null
+  if (ALLOWED_USERS.length > 0 && (!userId || !ALLOWED_USERS.includes(userId))) {
+    console.warn(`Заблокирована попытка доступа от пользователя: ${userId}`)
+    await ctx.reply("⛔ У вас нет доступа к этому боту.").catch((e) => console.error("reply fail:", e.message))
     return
   }
   await next()
@@ -513,10 +512,24 @@ bot.command("switch", async (ctx) => {
 })
 
 bot.catch((err) => {
-  console.error("Bot error:", err.message)
+  console.error("Bot error:", err.error?.message || err.message || err)
+  if (err.error?.stack) console.error(err.error.stack)
 })
 
 console.log("🤖 Telegram bot for OpenCode запущен")
 console.log(`Сервер: ${process.env.OPENCODE_SERVER_URL || "http://localhost:4096"}`)
+console.log("⏳ Запускаю long polling (ожидаю сообщения)...")
 
-bot.start()
+bot.start({
+  onStart: (botInfo) => {
+    console.log(`✅ Long polling запущен. Бот: @${botInfo.username} (id=${botInfo.id})`)
+  },
+}).catch((err) => {
+  console.error("❌ Не удалось запустить long polling:", err.message)
+  // Самая частая причина — другой инстанс бота с тем же токеном уже опрашивает Telegram.
+  if (/409|Conflict|terminated by other/i.test(err.message)) {
+    console.error("   Похоже, другой процесс уже использует этот же TELEGRAM_BOT_TOKEN.")
+    console.error("   Остановите старый бот или подождите ~1 мин, пока Telegram отпустит сессию.")
+  }
+  process.exit(1)
+})
