@@ -65,7 +65,7 @@
 | Пакет | Версия | Назначение |
 |-------|--------|-----------|
 | `@opencode-ai/sdk` | ^1.15.10 | Type-safe клиент к HTTP API OpenCode |
-| `node-telegram-bot-api` | ^0.67.0 | Telegram Bot API (long polling) |
+| `grammy` | ^1.35.0 | Telegram Bot API (long polling, ESM-native) |
 | `dotenv` | ^17.4.2 | Загрузка переменных из `.env` |
 
 ### API-ключи
@@ -112,7 +112,7 @@ npm init -y
 ### 2. Установка зависимостей
 
 ```powershell
-npm install @opencode-ai/sdk node-telegram-bot-api dotenv
+npm install @opencode-ai/sdk grammy dotenv
 ```
 
 ### 3. Настройка `.env`
@@ -174,12 +174,13 @@ opencode models opencode
 
 ### `src/index.js` — Точка входа
 
-Главный файл бота. Выполняет:
+Главный файл бота. Использует библиотеку **grammy** (ESM-native, без устаревших зависимостей). Выполняет:
 
 - Загрузку переменных окружения из `.env`
-- Инициализацию Telegram-бота с long polling
-- Регистрацию обработчиков команд (`/start`, `/help`, `/code`, `/new`, `/session`)
-- Обработку ошибок polling
+- Инициализацию Telegram-бота с long polling (`bot.start()`)
+- Регистрацию команд (`/start`, `/help`, `/code`, `/new`, `/session`)
+- Ленивую инициализацию OpenCode-клиента (`ensureClient()`)
+- Обработку ошибок через `bot.catch()`
 
 ```javascript
 // Основная логика команды /code:

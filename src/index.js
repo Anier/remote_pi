@@ -1,7 +1,7 @@
 import "dotenv/config"
-import TelegramBot from "node-telegram-bot-api"
+import { Bot } from "grammy"
 import { getClient } from "./opencode-client.js"
-import { getOrCreateSession, getSession, setSession, deleteSession } from "./session-store.js"
+import { getOrCreateSession, getSession, deleteSession } from "./session-store.js"
 import { streamResponse } from "./stream-handler.js"
 
 const token = process.env.TELEGRAM_BOT_TOKEN
@@ -10,11 +10,23 @@ if (!token) {
   process.exit(1)
 }
 
-const bot = new TelegramBot(token, { polling: true })
-const client = getClient()
+const bot = new Bot(token)
 
-bot.onText(/\/start/, (msg) => {
-  bot.sendMessage(msg.chat.id,
+let client = null
+function ensureClient() {
+  if (!client) {
+    try {
+      client = getClient()
+    } catch (err) {
+      console.error("Не удалось создать OpenCode-клиент:", err.message)
+      throw err
+    }
+  }
+  return client
+}
+
+bot.command("start", async (ctx) => {
+  await ctx.reply(
     "🤖 OpenCode Telegram Bot\n\n" +
     "• /code <запрос> — задать вопрос ИИ\n" +
     "• /new — новый диалог (сброс контекста)\n" +
@@ -24,8 +36,8 @@ bot.onText(/\/start/, (msg) => {
   )
 })
 
-bot.onText(/\/help/, (msg) => {
-  bot.sendMessage(msg.chat.id,
+bot.command("help", async (ctx) => {
+  await ctx.reply(
     "📋 Команды:\n" +
     "/code <запрос> — отправить запрос\n" +
     "/new — начать новый диалог\n" +
@@ -35,50 +47,58 @@ bot.onText(/\/help/, (msg) => {
   )
 })
 
-bot.onText(/\/code (.+)/, async (msg, match) => {
-  const chatId = String(msg.chat.id)
-  const prompt = match[1].trim()
+bot.command("code", async (ctx) => {
+  const chatId = String(ctx.chat.id)
+  const prompt = ctx.match?.trim()
+
   if (!prompt) {
-    await bot.sendMessage(chatId, "Укажите запрос после /code")
+    await ctx.reply("Укажите запрос после /code. Пример:\n/code Привет!")
     return
   }
+
   try {
-    const sessionId = await getOrCreateSession(client, chatId)
+    const c = ensureClient()
+    const sessionId = await getOrCreateSession(c, chatId)
     await streamResponse(chatId, sessionId, prompt, bot)
   } catch (err) {
-    await bot.sendMessage(chatId, `❌ Ошибка: ${err.message || err}`)
+    console.error("Ошибка в /code:", err.message)
+    await ctx.reply(`❌ Ошибка: ${err.message}`).catch(() => {})
   }
 })
 
-bot.onText(/\/new/, async (msg) => {
-  const chatId = String(msg.chat.id)
+bot.command("new", async (ctx) => {
+  const chatId = String(ctx.chat.id)
   deleteSession(chatId)
-  await bot.sendMessage(chatId, "✅ Начат новый диалог (контекст сброшен)")
+  await ctx.reply("✅ Начат новый диалог (контекст сброшен)")
 })
 
-bot.onText(/\/session/, async (msg) => {
-  const chatId = String(msg.chat.id)
+bot.command("session", async (ctx) => {
+  const chatId = String(ctx.chat.id)
   const sess = getSession(chatId)
   if (!sess) {
-    await bot.sendMessage(chatId, "❌ Нет активной сессии. Отправьте /code")
+    await ctx.reply("❌ Нет активной сессии. Отправьте /code")
     return
   }
   try {
-    const info = await client.session.get({ path: { id: sess.sessionId } })
-    await bot.sendMessage(chatId,
-      `📋 Сессия: \`${sess.sessionId}\`\n` +
+    const c = ensureClient()
+    const info = await c.session.get({ path: { id: sess.sessionId } })
+    await ctx.reply(
+      `📋 Сессия: <code>${sess.sessionId}</code>\n` +
       `Создана: ${new Date(sess.createdAt).toLocaleString("ru-RU")}\n` +
-      `Сообщений: ${info.children?.length || 0}`
+      `Сообщений: ${info?.data?.children?.length || 0}`,
+      { parse_mode: "HTML" }
     )
   } catch {
-    await bot.sendMessage(chatId, "❌ Сессия недоступна. Используйте /new")
+    await ctx.reply("❌ Сессия недоступна. Используйте /new").catch(() => {})
   }
 })
 
-bot.on("polling_error", (err) => {
-  console.error("Polling error:", err.message)
+bot.catch((err) => {
+  console.error("Bot error:", err.message)
 })
 
 console.log("🤖 Telegram bot for OpenCode запущен")
 console.log(`Модель: ${process.env.DEFAULT_MODEL_PROVIDER}/${process.env.DEFAULT_MODEL_ID}`)
 console.log(`Сервер: ${process.env.OPENCODE_SERVER_URL}`)
+
+bot.start()

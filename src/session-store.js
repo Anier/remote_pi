@@ -43,16 +43,24 @@ export function deleteSession(chatId) {
 
 export async function getOrCreateSession(client, chatId) {
   const existing = getSession(chatId)
-  if (existing) {
+  if (existing?.sessionId) {
     try {
-      await client.session.get({ path: { id: existing.sessionId } })
-      return existing.sessionId
+      const info = await client.session.get({ path: { id: existing.sessionId } })
+      if (info?.data?.id) {
+        return existing.sessionId
+      }
     } catch {
     }
   }
+
   const session = await client.session.create({
     body: { title: `Telegram-${chatId}` }
   })
-  setSession(chatId, session.id)
-  return session.id
+
+  if (!session?.data?.id) {
+    throw new Error("Не удалось создать сессию: нет id в ответе")
+  }
+
+  setSession(chatId, session.data.id)
+  return session.data.id
 }
