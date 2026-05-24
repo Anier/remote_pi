@@ -5,6 +5,9 @@ import { getUserSettings } from "./user-store.js"
 const THROTTLE_MS = 300
 const SSE_TIMEOUT_MS = 120000
 
+// Map to store active AbortControllers per sessionId
+export const activeRequests = new Map()
+
 export async function streamResponse(chatId, sessionId, prompt, bot) {
   const client = getClient()
   const userSettings = getUserSettings(chatId)
@@ -18,6 +21,7 @@ export async function streamResponse(chatId, sessionId, prompt, bot) {
   let lastUpdate = 0
 
   const abortController = new AbortController()
+  activeRequests.set(sessionId, abortController)
 
   const ssePromise = (async () => {
     try {
@@ -43,6 +47,19 @@ export async function streamResponse(chatId, sessionId, prompt, bot) {
             }
           }
 
+          if (event.type === "permission.updated") {
+            const perm = props || {}
+            if (perm.state === "pending") {
+              await bot.api.sendMessage(chatId, 
+                `🔐 <b>Запрос разрешения:</b>\n\n` +
+                `📝 <b>${perm.title || "Без названия"}</b>\n` +
+                `${perm.description || ""}\n\n` +
+                `<i>Бот ожидает подтверждения на сервере. Если вы запустили сервер с флагом -SkipPermissions, это сообщение можно игнорировать.</i>`,
+                { parse_mode: "HTML" }
+              ).catch(() => {})
+            }
+          }
+
           if (event.type === "session.continue" || event.type === "session.done") {
             break
           }
@@ -63,7 +80,8 @@ export async function streamResponse(chatId, sessionId, prompt, bot) {
       body: {
         model: { providerID: provider, modelID: modelId },
         parts: [{ type: "text", text: prompt }]
-      }
+      },
+      signal: abortController.signal
     })
 
     abortController.abort()
@@ -78,10 +96,16 @@ export async function streamResponse(chatId, sessionId, prompt, bot) {
       buffer = resultText
     }
   } catch (err) {
+    activeRequests.delete(sessionId)
     abortController.abort()
     await ssePromise.catch(() => {})
 
     const msg = err?.message || String(err)
+
+    if (err.name === "AbortError") {
+      await bot.api.editMessageText(chatId, messageId, buffer + "\n\n🛑 <b>Остановлено пользователем.</b>", { parse_mode: "HTML" }).catch(() => {})
+      return
+    }
 
     if (msg.includes("401") || msg.includes("Unauthorized")) {
       await bot.api.sendMessage(chatId,
@@ -93,6 +117,8 @@ export async function streamResponse(chatId, sessionId, prompt, bot) {
 
     await bot.api.sendMessage(chatId, `❌ Ошибка: ${msg}`).catch(() => {})
     return
+  } finally {
+    activeRequests.delete(sessionId)
   }
 
   const finalText = buffer ? buffer + "\n\n✅ Готово" : "❗ Пустой ответ"

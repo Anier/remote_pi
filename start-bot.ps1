@@ -1,5 +1,6 @@
 param(
-  [switch]$NoServe
+  [switch]$NoServe,
+  [switch]$SkipPermissions
 )
 
 $ProjectDir = "D:\www\ai\remote_ai"
@@ -28,17 +29,25 @@ if (-not $NoServe) {
     Start-Sleep -Seconds 1
   }
 
+  $serveArgs = @("-NoLogo", "-NoProfile", "-File", "$env:APPDATA\npm\opencode.ps1", "serve", "--port", "4096", "--hostname", "127.0.0.1")
+  $envArgs = ""
+  if ($SkipPermissions) {
+    Write-Host "Включен режим автоматического подтверждения команд (--dangerously-skip-permissions)"
+    $serveArgs += "--dangerously-skip-permissions"
+    $envArgs = "--dangerously-skip-permissions"
+  }
+
   Write-Host "Запускаю opencode serve..."
   $null = New-Item -ItemType Directory -Path $LogDir -Force
-  # opencode.ps1 — это PowerShell-скрипт, запускаем через powershell
   Start-Process -WindowStyle Hidden -FilePath "powershell.exe" `
-    -ArgumentList "-NoLogo", "-NoProfile", `
-      "-File", "$env:APPDATA\npm\opencode.ps1", `
-      "serve", "--port", "4096", "--hostname", "127.0.0.1" `
+    -ArgumentList $serveArgs `
     -RedirectStandardOutput "$LogDir\serve.log" `
     -RedirectStandardError "$LogDir\serve-error.log"
   Write-Host "Ожидаю запуск сервера..."
   Start-Sleep -Seconds 4
+  
+  # Сохраняем аргументы сервера для отображения в боте
+  $env:OPENCODE_SERVER_ARGS = $envArgs
 }
 
 Set-Location $ProjectDir
