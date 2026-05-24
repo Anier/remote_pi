@@ -1,0 +1,19 @@
+{
+  "name": "remote_ai",
+  "version": "1.0.0",
+  "description": "Telegram bot for OpenCode",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "serve": "opencode serve --port 4096 --hostname 127.0.0.1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.15.10",
+    "dotenv": "^17.4.2",
+    "node-telegram-bot-api": "^0.67.0"
+  }
+}
