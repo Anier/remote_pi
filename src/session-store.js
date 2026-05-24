@@ -49,7 +49,17 @@ export async function getOrCreateSession(client, chatId) {
       if (info?.data?.id) {
         return existing.sessionId
       }
-    } catch {
+      // Сервер ответил, но сессии нет — создаём новую ниже.
+    } catch (err) {
+      const status = err?.status ?? err?.response?.status
+      const msg = err?.message || String(err)
+      // 404 / not found = сессия удалена. Любую другую ошибку (сеть, 5xx, 401)
+      // пробрасываем наверх, иначе мы потеряем контекст при временном сбое сервера.
+      const isNotFound = status === 404 || /not[ _]?found|no such session/i.test(msg)
+      if (!isNotFound) {
+        console.error("Не удалось проверить существующую сессию:", msg)
+        throw err
+      }
     }
   }
 

@@ -4,8 +4,13 @@
   "description": "Telegram bot for OpenCode",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
+    "start": "node scripts/start.js",
+    "start:bot": "node src/index.js",
+    "start:skip-permissions": "node scripts/start.js --skip-permissions",
     "serve": "opencode serve --port 4096 --hostname 127.0.0.1"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "keywords": [],
   "author": "",

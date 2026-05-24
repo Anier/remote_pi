@@ -148,17 +148,47 @@ DEFAULT_MODEL_ID=big-pickle
 
 ## Запуск
 
-### PowerShell-скрипт (рекомендуется)
+Бот запускается через кросс-платформенный Node-супервизор (`scripts/start.js`),
+который поднимает `opencode serve`, ждёт его готовности и затем стартует Telegram-бота.
+Супервизор корректно гасит дочерние процессы по `Ctrl+C` и автоматически перезапускает
+связку при переключении режима `/danger on|off`.
 
-Скрипт автоматически завершает старые процессы бота и сервера, проверяет порты и запускает всё заново:
+### Любая ОС (рекомендуется)
 
-```powershell
-.\start-bot.ps1
+```bash
+npm start                       # обычный режим
+npm run start:skip-permissions  # режим авто-подтверждения (как /danger on)
+npm run start:bot               # только бот, без перезапуска opencode serve
 ```
 
-**Дополнительные флаги:**
-*   `-NoServe` — не перезапускать сервер (только бота).
-*   `-SkipPermissions` — запустить сервер в режиме **автоматического подтверждения** всех команд (режим `/danger on`).
+Или напрямую:
+
+```bash
+node scripts/start.js [--skip-permissions] [--no-serve]
+```
+
+### Linux / macOS
+
+```bash
+./start-bot.sh [--skip-permissions] [--no-serve]
+```
+
+### Windows (PowerShell)
+
+```powershell
+.\start-bot.ps1 [-SkipPermissions] [-NoServe]
+```
+
+PowerShell-скрипт теперь — тонкая обёртка над Node-супервизором, поэтому хардкод путей
+больше не нужен: всё работает из любой директории, где находится репозиторий.
+
+**Переменные окружения для тонкой настройки:**
+* `OPENCODE_PORT` (по умолчанию `4096`)
+* `OPENCODE_HOST` (по умолчанию `127.0.0.1`)
+* `OPENCODE_BIN` (по умолчанию `opencode` / `opencode.cmd` на Windows)
+* `TELEGRAM_THROTTLE_MS` — пауза между обновлениями Telegram-сообщения (по умолчанию `1000`)
+* `SSE_IDLE_TIMEOUT_MS` — idle-таймаут SSE-подписки в мс (по умолчанию 5 мин)
+* `TELEGRAM_ALLOW_ALL=true` — намеренно открыть бот всем пользователям (по умолчанию fail-closed)
 
 ---
 
