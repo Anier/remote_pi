@@ -1,16 +1,13 @@
 import "dotenv/config"
-import { Bot, InlineKeyboard, InputFile } from "grammy"
-import { exec } from "node:child_process"
-import { promisify } from "node:util"
-import { dirname, resolve } from "node:path"
+import { Bot, InputFile } from "grammy"
+import { dirname, resolve, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { existsSync } from "node:fs"
-import { getClient } from "./opencode-client.js"
-import { getOrCreateSession, getSession, deleteSession, setSession } from "./session-store.js"
-import { streamResponse, activeRequests } from "./stream-handler.js"
+import { existsSync, readFileSync } from "node:fs"
+import { modelRegistry } from "./pi-client.js"
+import { getSession, deleteSession, setSession, getOrCreateSessionManager, findSessionFile, SESSION_DIR } from "./session-store.js"
+import { streamResponse, abortStream } from "./stream-handler.js"
 import { getUserSettings, setUserModel } from "./user-store.js"
-
-const execAsync = promisify(exec)
+import { SessionManager } from "@earendil-works/pi-coding-agent"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = resolve(__dirname, "..")
@@ -23,8 +20,6 @@ if (!token) {
 
 const bot = new Bot(token)
 
-// Список разрешённых user ID. Пустой список = доступ открыт всем (для совместимости).
-// Чтобы ограничить доступ — задайте TELEGRAM_ALLOWED_USERS=123,456 в .env.
 const ALLOWED_USERS = (process.env.TELEGRAM_ALLOWED_USERS || "")
   .split(",")
   .map(id => id.trim())
@@ -40,7 +35,6 @@ if (ALLOWED_USERS.length === 0) {
   console.log(`🔐 Разрешённые пользователи: ${ALLOWED_USERS.join(", ")}`)
 }
 
-// Лог входящих апдейтов — помогает понять, что Telegram реально доставляет сообщения.
 bot.use(async (ctx, next) => {
   const chatId = ctx.chat?.id
   const userId = ctx.from?.id
@@ -53,7 +47,6 @@ bot.use(async (ctx, next) => {
   await next()
 })
 
-// Middleware для ограничения доступа.
 bot.use(async (ctx, next) => {
   const userId = ctx.from?.id != null ? String(ctx.from.id) : null
   if (ALLOWED_USERS.length > 0 && (!userId || !ALLOWED_USERS.includes(userId))) {
@@ -64,43 +57,20 @@ bot.use(async (ctx, next) => {
   await next()
 })
 
-let client = null
-function ensureClient() {
-  if (!client) {
-    try {
-      client = getClient()
-    } catch (err) {
-      console.error("Не удалось создать OpenCode-клиент:", err.message)
-      throw err
-    }
-  }
-  return client
-}
-
 function formatSessionHistory(msgs) {
   let output = ""
   for (const msg of msgs) {
-    const role = msg.info?.role === "user" ? "USER" : "ASSISTANT"
-    const time = msg.info?.time?.created ? new Date(msg.info.time.created).toLocaleString("ru-RU") : ""
-    output += `\n--- ${role} (${time}) ---\n`
+    const role = msg.role === "user" ? "USER" : "ASSISTANT"
+    output += `\n--- ${role} ---\n`
     
-    if (!msg.parts) continue
-    
-    for (const part of msg.parts) {
-      if (part.type === "text") {
-        output += (part.text || "") + "\n"
-      } else if (part.type === "reasoning") {
-        output += `\n[Рассуждение]\n${part.text}\n`
-      } else if (part.type === "tool") {
-        const toolName = part.tool || "unknown"
-        const status = part.state?.status || ""
-        output += `\n[Инструмент: ${toolName}] (${status})\n`
-        if (part.state?.input) {
-          output += `Аргументы: ${JSON.stringify(part.state.input, null, 2)}\n`
-        }
-        if (part.state?.output) {
-          const out = String(part.state.output)
-          output += `Результат: ${out.length > 500 ? out.slice(0, 500) + "..." : out}\n`
+    if (msg.role === "user") {
+      output += (msg.text || "") + "\n"
+    } else if (msg.role === "assistant") {
+      for (const part of msg.content || []) {
+        if (part.type === "text") output += (part.text || "") + "\n"
+        if (part.type === "thinking") output += `\n[Рассуждение]\n${part.text}\n`
+        if (part.type === "toolCall") {
+          output += `\n[Инструмент: ${part.name}] (${JSON.stringify(part.input, null, 2)})\n`
         }
       }
     }
@@ -115,17 +85,13 @@ function getActiveModel(chatId) {
   return `${provider}/${modelId}`
 }
 
-// Достаёт идентификатор модели из последнего ассистентского сообщения сессии,
-// чтобы /session мог показать модель, которой реально пользуется сессия.
 function extractSessionModel(messages) {
   if (!Array.isArray(messages)) return null
   for (let i = messages.length - 1; i >= 0; i--) {
-    const info = messages[i]?.info || messages[i]
-    if (!info || info.role && info.role !== "assistant") continue
-    const provider = info.providerID || info.provider || info.model?.providerID
-    const modelId = info.modelID || info.model || info.model?.modelID
-    if (provider && modelId) return `${provider}/${modelId}`
-    if (modelId) return String(modelId)
+    const msg = messages[i]
+    if (msg?.role === "assistant" && msg.model) {
+      return `${msg.model.provider}/${msg.model.modelId}`
+    }
   }
   return null
 }
@@ -134,18 +100,18 @@ bot.command("start", async (ctx) => {
   const chatId = String(ctx.chat.id)
   const modelStr = getActiveModel(chatId)
   await ctx.reply(
-    "🤖 OpenCode Telegram Bot\n\n" +
+    "🤖 Pi Agent Telegram Bot\n\n" +
     "• /code <запрос> — задать вопрос ИИ\n" +
     "• /stop — остановить генерацию ответа\n" +
-    "• /new [имя] — новый диалог (с опциональным именем)\n" +
+    "• /new [имя] — новый диалог\n" +
     "• /model <provider/model> — сменить модель\n" +
     "• /models — список доступных моделей\n" +
-    "• /session [id] [-f] — инфо о сессии (добавьте -f для загрузки файла истории)\n" +
+    "• /session [id] [-f] — инфо о сессии (добавьте -f для скачивания файла истории)\n" +
     "• /sessions — список всех сессий\n" +
     "• /switch <id> — переключиться на другую сессию\n" +
-    "• /projects — список проектов на сервере\n" +
-    "• /danger <on|off> — режим авто-подтверждения команд\n" +
-    "• /help — эта справка\n\n" +
+    "• /projects — инфо о рабочей папке\n" +
+    "• /danger — отключено (встроено)\n" +
+    "• /help — справка\n\n" +
     `Текущая модель: ${modelStr}`
   )
 })
@@ -157,16 +123,13 @@ bot.command("help", async (ctx) => {
     "📋 Команды:\n" +
     "/code <запрос> — отправить запрос\n" +
     "/stop — остановить текущую генерацию\n" +
-    "/new [имя] — начать новый диалог (можно задать имя)\n" +
+    "/new [имя] — начать новый диалог\n" +
     "/model <provider/model> — сменить модель\n" +
     "/models — список доступных моделей\n" +
-    "/session [id] [-f] — инфо о сессии (добавьте -f для скачивания истории файлом)\n" +
+    "/session [id] [-f] — инфо о сессии (добавьте -f для скачивания)\n" +
     "/sessions — список всех сессий\n" +
     "/switch <id> — переключиться на другую сессию\n" +
-    "/projects — список проектов на сервере\n" +
-    "/danger <on|off> — включить/выключить авто-подтверждение всех команд (RESTART)\n\n" +
-    "Ответы приходят токен за токеном, как в TUI.\n" +
-    "В конце добавляется ✅ Готово.\n\n" +
+    "/projects — инфо о текущей папке проекта\n\n" +
     `Текущая модель: ${modelStr}`
   )
 })
@@ -176,10 +139,8 @@ bot.command("stop", async (ctx) => {
   const sess = getSession(chatId)
   if (!sess) return ctx.reply("❌ Нет активной сессии.")
 
-  const controllers = activeRequests.get(sess.sessionId)
-  if (controllers) {
-    controllers.promptController?.abort()
-    controllers.sseController?.abort()
+  const stopped = abortStream(sess.sessionId)
+  if (stopped) {
     await ctx.reply("🛑 Запрос на остановку отправлен.")
   } else {
     await ctx.reply("ℹ️ Сейчас нет активных запросов для этой сессии.")
@@ -187,108 +148,50 @@ bot.command("stop", async (ctx) => {
 })
 
 bot.command("danger", async (ctx) => {
-  const mode = ctx.match?.trim().toLowerCase()
-
-  if (mode !== "on" && mode !== "off") {
-    await ctx.reply(
-      "Укажите режим: <code>/danger on</code> или <code>/danger off</code>\n\n" +
-      "Внимание: это приведет к полной перезагрузке бота и сервера.",
-      { parse_mode: "HTML" }
-    )
-    return
-  }
-
-  // Если бот запущен через супервизор (scripts/start.js) — сигналим ему через файл-флаг и выходим.
-  // Супервизор перезапустит связку с/без --dangerously-skip-permissions.
-  const supervisorPid = process.env.OPENCODE_SUPERVISOR_PID
-  const flagPath = resolve(PROJECT_ROOT, "data", "danger.flag")
-  if (supervisorPid) {
-    try {
-      const { writeFileSync, mkdirSync } = await import("node:fs")
-      mkdirSync(dirname(flagPath), { recursive: true })
-      writeFileSync(flagPath, mode)
-      await ctx.reply(
-        mode === "on"
-          ? "🚀 Включаю режим авто-подтверждения. Бот и сервер будут перезагружены..."
-          : "🛡 Выключаю режим авто-подтверждения. Бот и сервер будут перезагружены..."
-      )
-      // Даём Telegram доставить сообщение и выходим — супервизор подхватит флаг.
-      setTimeout(() => process.exit(0), 500)
-      return
-    } catch (err) {
-      console.error("Не удалось записать флаг для супервизора:", err.message)
-    }
-  }
-
-  // Fallback на Windows-only flow через PowerShell-скрипт.
-  const psScriptPath = resolve(PROJECT_ROOT, "start-bot.ps1")
-  if (!existsSync(psScriptPath) || process.platform !== "win32") {
-    await ctx.reply(
-      "❌ /danger требует запуска через супервизор (scripts/start.js) или PowerShell-скрипт start-bot.ps1 (Windows).\n" +
-      "Запустите бот через <code>npm start</code> для поддержки переключения режима.",
-      { parse_mode: "HTML" }
-    )
-    return
-  }
-
-  const psArgs = mode === "on"
-    ? ["-NoProfile", "-File", psScriptPath, "-SkipPermissions"]
-    : ["-NoProfile", "-File", psScriptPath]
-  const cp = await import("node:child_process")
-  cp.spawn("powershell.exe", ["-Command",
-    "Start-Process", "powershell.exe",
-    "-ArgumentList", psArgs.map(a => `'${a.replace(/'/g, "''")}'`).join(","),
-    "-WindowStyle", "Hidden",
-  ], { detached: true, stdio: "ignore" }).unref()
-
-  await ctx.reply(
-    mode === "on"
-      ? "🚀 Включаю режим авто-подтверждения. Бот и сервер будут перезагружены..."
-      : "🛡 Выключаю режим авто-подтверждения. Бот и сервер будут перезагружены..."
-  )
+  await ctx.reply("⚠️ Эта команда отключена. Pi Agent встроен напрямую в бота и управляет правами автоматически.")
 })
 
 bot.command("projects", async (ctx) => {
-  await ctx.reply("⏳ Загружаю список проектов...")
-  try {
-    const c = ensureClient()
-    const res = await c.project.list()
-    const projects = res.data || []
-    
-    if (projects.length === 0) {
-      return ctx.reply("Список проектов пуст.")
-    }
-
-    const visibleProjects = projects.filter(p => p.id !== "global")
-    let text = "📁 <b>Доступные проекты:</b>\n\n"
-    visibleProjects.forEach((p, i) => {
-      const name = (p.worktree || "").split(/[\\/]/).pop() || p.id
-      text += `${i + 1}. <b>${name}</b>\n`
-      text += `🆔 <code>${p.id}</code>\n`
-      text += `📍 <code>${p.worktree || ""}</code>\n\n`
-    })
-
-    text += "Чтобы начать работу в проекте, переключитесь на одну из его сессий через /sessions и /switch."
-    await ctx.reply(text, { parse_mode: "HTML" })
-  } catch (err) {
-    await ctx.reply(`❌ Ошибка: ${err.message}`)
-  }
+  await ctx.reply(`📁 <b>Текущая рабочая папка (проект):</b>\n\n<code>${process.cwd()}</code>`, { parse_mode: "HTML" })
 })
 
 bot.command("models", async (ctx) => {
   await ctx.reply("⏳ Загружаю список моделей...")
   try {
-    const { stdout } = await execAsync("opencode models")
-    const models = stdout.trim()
-    if (!models) {
+    const allModels = modelRegistry.getAll()
+    if (!allModels || allModels.length === 0) {
       await ctx.reply("Список моделей пуст или недоступен.")
       return
     }
     
-    if (models.length > 4000) {
-      await ctx.reply(`Доступные модели:\n\n${models.slice(0, 3900)}... (список обрезан)`)
+    // Группируем по провайдеру для удобства
+    const grouped = {}
+    allModels.forEach(m => {
+      if (!grouped[m.provider]) grouped[m.provider] = []
+      grouped[m.provider].push(m.id)
+    })
+
+    let text = "📋 <b>Доступные модели:</b>\n\n"
+    for (const [provider, ids] of Object.entries(grouped)) {
+      text += `🔹 <b>${provider}:</b>\n`
+      ids.forEach(id => {
+        text += `  <code>${provider}/${id}</code>\n`
+      })
+      text += "\n"
+    }
+
+    if (text.length > 4000) {
+      let truncated = text.slice(0, 3900)
+      // Закрываем открытые теги, если они были обрезаны
+      if ((truncated.match(/<code>/g) || []).length > (truncated.match(/<\/code>/g) || []).length) {
+        truncated += "</code>"
+      }
+      if ((truncated.match(/<b>/g) || []).length > (truncated.match(/<\/b>/g) || []).length) {
+        truncated += "</b>"
+      }
+      await ctx.reply(truncated + "\n\n... (список обрезан)", { parse_mode: "HTML" })
     } else {
-      await ctx.reply(`Доступные модели:\n\n${models}`)
+      await ctx.reply(text, { parse_mode: "HTML" })
     }
   } catch (err) {
     await ctx.reply("❌ Ошибка при получении списка моделей: " + err.message)
@@ -312,7 +215,7 @@ bot.command("model", async (ctx) => {
     provider = parts[0]
     modelId = parts.slice(1).join('/')
   } else {
-    provider = "opencode"
+    provider = "opencode" // Default provider
     modelId = prompt
   }
 
@@ -330,9 +233,7 @@ bot.command("code", async (ctx) => {
   }
 
   try {
-    const c = ensureClient()
-    const sessionId = await getOrCreateSession(c, chatId)
-    await streamResponse(chatId, sessionId, prompt, bot)
+    await streamResponse(chatId, prompt, bot)
   } catch (err) {
     console.error("Ошибка в /code:", err.message)
     await ctx.reply(`❌ Ошибка: ${err.message}`).catch(() => {})
@@ -341,23 +242,33 @@ bot.command("code", async (ctx) => {
 
 bot.command("new", async (ctx) => {
   const chatId = String(ctx.chat.id)
-  const title = ctx.match?.trim()
+  const args = ctx.match?.trim() || ""
+
+  let cwd = null
+  let title = `Telegram-${chatId}`
+
+  // Попытка распарсить: /new <cwd> <title>
+  // Простая эвристика: если начинается с буквы диска или /, это путь.
+  const parts = args.split(/\s+/)
+  if (parts.length > 0 && (parts[0].match(/^[a-zA-Z]:[\\/]/) || parts[0].startsWith("/") || parts[0].startsWith("."))) {
+    cwd = parts[0]
+    if (parts.length > 1) {
+      title = parts.slice(1).join(" ")
+    }
+  } else if (args) {
+    title = args
+  }
 
   try {
-    if (title) {
-      const c = ensureClient()
-      const session = await c.session.create({
-        body: { title: title }
-      })
-      if (!session?.data?.id) {
-        throw new Error("Не удалось создать сессию: нет id в ответе")
-      }
-      setSession(chatId, session.data.id)
-      await ctx.reply(`✅ Начат новый диалог с именем: <b>${title}</b>\n(контекст сброшен)`, { parse_mode: "HTML" })
-    } else {
-      deleteSession(chatId)
-      await ctx.reply("✅ Начат новый диалог (контекст сброшен)")
-    }
+    deleteSession(chatId)
+    // Передаем новый CWD при создании менеджера
+    const manager = await getOrCreateSessionManager(chatId, cwd)
+    manager.appendSessionInfo(title)
+    
+    // Принудительно сохраняем сессию в кеш и в файл-хранилище, чтобы не потерять путь
+    setSession(chatId, manager.getSessionId(), manager.getSessionFile(), manager.getCwd())
+
+    await ctx.reply(`✅ Начат новый диалог с именем: <b>${title}</b>\n📁 Папка: <code>${manager.getCwd()}</code>\n(контекст сброшен)`, { parse_mode: "HTML" })
   } catch (err) {
     await ctx.reply(`❌ Ошибка при создании сессии: ${err.message}`)
   }
@@ -371,11 +282,8 @@ bot.command("session", async (ctx) => {
   let sendFile = false
 
   for (const arg of args) {
-    if (arg === "-f") {
-      sendFile = true
-    } else if (!targetSessionId && arg.length > 0) {
-      targetSessionId = arg
-    }
+    if (arg === "-f") sendFile = true
+    else if (!targetSessionId && arg.length > 0) targetSessionId = arg
   }
 
   if (!targetSessionId) {
@@ -389,22 +297,35 @@ bot.command("session", async (ctx) => {
   }
 
   try {
-    const c = ensureClient()
-    const [info, msgs, project] = await Promise.all([
-      c.session.get({ path: { id: targetSessionId } }),
-      c.session.messages({ path: { id: targetSessionId } }),
-      c.project.current()
-    ])
+    let sessionFile = findSessionFile(targetSessionId)
+    const existing = getSession(chatId)
+    
+    if (!sessionFile && existing?.sessionId === targetSessionId && existing?.sessionFile) {
+      sessionFile = existing.sessionFile
+    }
+
+    if (!sessionFile || !existsSync(sessionFile)) {
+      if (!sessionFile) {
+        await ctx.reply("❌ Сессия не найдена на диске.")
+        return
+      }
+    }
+
+    // Если это текущая сессия, забираем менеджер из кеша, чтобы показать актуальное имя (даже если оно не сохранено)
+    let m;
+    if (targetSessionId === existing?.sessionId) {
+      m = await getOrCreateSessionManager(chatId)
+    } else {
+      m = SessionManager.open(sessionFile, SESSION_DIR)
+    }
+    
+    const context = m.buildSessionContext()
+    const msgs = context.messages || []
     
     const userModelStr = getActiveModel(chatId)
-    const sessionModelStr = extractSessionModel(msgs?.data) || extractSessionModel([{ info: info?.data }])
-    const pwd = info?.data?.directory || project?.data?.worktree || "Неизвестно"
-    const summary = info?.data?.summary || {}
-    const title = info?.data?.title || info?.data?.slug || "Без названия"
-
-    // Check if auto-confirm is active on server
-    const isDanger = process.env.OPENCODE_SERVER_ARGS?.includes("--dangerously-skip-permissions") || false
-    const dangerStatus = isDanger ? "🚀 ON (авто-подтверждение)" : "🛡 OFF (безопасно)"
+    const sessionModelStr = extractSessionModel(msgs)
+    const pwd = m.getCwd() || process.cwd()
+    const title = m.getSessionName() || targetSessionId
 
     const modelLine = sessionModelStr && sessionModelStr !== userModelStr
       ? `🤖 <b>Модель пользователя:</b> ${userModelStr}\n` +
@@ -415,17 +336,14 @@ bot.command("session", async (ctx) => {
       `📋 <b>Инфо о сессии:</b>\n\n` +
       `🆔 <code>${targetSessionId}</code>\n` +
       `📝 <b>Заголовок:</b> ${title}\n` +
-      `💬 <b>Сообщений:</b> ${msgs?.data?.length || 0}\n` +
-      `🛠 <b>Правки:</b> +${summary.additions || 0} / -${summary.deletions || 0} (${summary.files || 0} файлов)\n` +
+      `💬 <b>Сообщений:</b> ${msgs.length}\n` +
       modelLine +
-      `📁 <b>Папка:</b> <code>${pwd}</code>\n` +
-      `⚡ <b>Режим подтверждений:</b> ${dangerStatus}\n` +
-      `🕒 <b>Обновлена:</b> ${new Date(info?.data?.time?.updated || info?.data?.time?.created).toLocaleString("ru-RU")}`,
+      `📁 <b>Папка:</b> <code>${pwd}</code>\n`,
       { parse_mode: "HTML" }
     )
 
-    if (sendFile && msgs?.data?.length > 0) {
-      const historyText = formatSessionHistory(msgs.data)
+    if (sendFile && msgs.length > 0) {
+      const historyText = formatSessionHistory(msgs)
       const fileName = `history-${targetSessionId.slice(-8)}.md`
       await ctx.replyWithDocument(new InputFile(Buffer.from(historyText), fileName), {
         caption: `📄 История сессии ${targetSessionId}`
@@ -441,21 +359,16 @@ bot.command("sessions", async (ctx) => {
   const chatId = String(ctx.chat.id)
   await ctx.reply("⏳ Загружаю список сессий...")
   try {
-    const c = ensureClient()
-    const res = await c.session.list()
-    const sessions = res.data || []
+    const sessions = await SessionManager.list(process.cwd(), SESSION_DIR)
     
-    if (sessions.length === 0) {
-      return ctx.reply("Список сессий пуст.")
+    if (!sessions || sessions.length === 0) {
+      return ctx.reply("Список сессий пуст (сессии сохраняются только после первого ответа бота).")
     }
-
-    sessions.sort((a, b) => (b.time?.updated || 0) - (a.time?.updated || 0))
 
     const LIMIT = 15
     const currentSessionId = getSession(chatId)?.sessionId || null
     let topSessions = sessions.slice(0, LIMIT)
 
-    // Если активная сессия не попала в топ — добавляем её в начало списка.
     if (currentSessionId && !topSessions.some(s => s.id === currentSessionId)) {
       const current = sessions.find(s => s.id === currentSessionId)
       if (current) topSessions = [current, ...topSessions].slice(0, LIMIT)
@@ -464,14 +377,10 @@ bot.command("sessions", async (ctx) => {
     let text = `📋 <b>Доступные сессии</b> (показано ${topSessions.length} из ${sessions.length}):\n\n`
 
     topSessions.forEach((s, i) => {
-      const ts = s.time?.updated || s.time?.created
-      const date = ts ? new Date(ts).toLocaleString("ru-RU") : "Неизвестно"
       const currentIndicator = currentSessionId === s.id ? " 🟢 (текущая)" : ""
-
       text += `${i + 1}. <code>${s.id}</code>${currentIndicator}\n`
-      text += `📝 Имя: ${s.title || s.slug || "Без имени"}\n`
-      text += `📁 Папка: <code>${s.directory || "Неизвестно"}</code>\n`
-      text += `⏱ Обновлена: ${date}\n\n`
+      text += `📝 Имя: ${s.name || "Без имени"}\n`
+      text += `📁 Папка: <code>${s.cwd || "Неизвестно"}</code>\n\n`
     })
 
     text += "Чтобы переключиться на нужную сессию, введите:\n<code>/switch &lt;ID_СЕССИИ&gt;</code>"
@@ -490,16 +399,16 @@ bot.command("switch", async (ctx) => {
   }
 
   try {
-    const c = ensureClient()
-    const info = await c.session.get({ path: { id: sessionId } })
-    
-    if (!info?.data?.id) {
+    const sessionFile = findSessionFile(sessionId)
+    if (!sessionFile || !existsSync(sessionFile)) {
        return ctx.reply("❌ Сессия с таким ID не найдена.")
     }
     
-    setSession(chatId, sessionId)
+    // Передаем и ID, и точный путь к файлу в память
+    setSession(chatId, sessionId, sessionFile)
+    const m = SessionManager.open(sessionFile, SESSION_DIR)
     
-    const pwd = info.data.directory || "Неизвестно"
+    const pwd = m.getCwd() || "Неизвестно"
     await ctx.reply(
       `✅ Контекст успешно переключен!\n\n` +
       `📋 Сессия: <code>${sessionId}</code>\n` +
@@ -507,7 +416,7 @@ bot.command("switch", async (ctx) => {
       { parse_mode: "HTML" }
     )
   } catch (err) {
-    await ctx.reply(`❌ Ошибка переключения. Возможно, сессия не существует или сервер недоступен.\nДетали: ${err.message}`)
+    await ctx.reply(`❌ Ошибка переключения. Детали: ${err.message}`)
   }
 })
 
@@ -516,8 +425,7 @@ bot.catch((err) => {
   if (err.error?.stack) console.error(err.error.stack)
 })
 
-console.log("🤖 Telegram bot for OpenCode запущен")
-console.log(`Сервер: ${process.env.OPENCODE_SERVER_URL || "http://localhost:4096"}`)
+console.log("🤖 Telegram bot for Pi Agent запущен")
 console.log("⏳ Запускаю long polling (ожидаю сообщения)...")
 
 bot.start({
@@ -526,10 +434,5 @@ bot.start({
   },
 }).catch((err) => {
   console.error("❌ Не удалось запустить long polling:", err.message)
-  // Самая частая причина — другой инстанс бота с тем же токеном уже опрашивает Telegram.
-  if (/409|Conflict|terminated by other/i.test(err.message)) {
-    console.error("   Похоже, другой процесс уже использует этот же TELEGRAM_BOT_TOKEN.")
-    console.error("   Остановите старый бот или подождите ~1 мин, пока Telegram отпустит сессию.")
-  }
   process.exit(1)
 })
