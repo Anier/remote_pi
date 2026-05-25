@@ -1,28 +1,30 @@
 # Pi Agent Telegram Bot
 
-Telegram-бот для взаимодействия с [Pi Coding Agent](https://pi.dev). Бот позволяет общаться с ИИ-агентом, выполнять команды в терминале и редактировать файлы прямо через Telegram.
+[Читать на русском языке (README_RU.md)](./README_RU.md)
 
-## Особенности
+A Telegram bot for interacting with the [Pi Coding Agent](https://pi.dev). This bot allows you to chat with an AI agent, execute terminal commands, and edit files directly through Telegram.
 
-- 🤖 **Встроенный агент:** Не требует отдельного сервера, работает напрямую через SDK.
-- 💬 **Стриминг ответов:** Текст приходит постепенно, с обработкой ошибок API.
-- 📁 **Контекст сессий:** История диалогов и состояние инструментов сохраняются на диске.
-- 🛠 **Поддержка инструментов:** Агент может читать файлы, выполнять bash-команды и предлагать правки.
-- 🔐 **Безопасность:** Ограничение доступа по белому списку Telegram User ID.
+## Features
 
-## Установка
+- 🤖 **Embedded Agent:** No separate server required; runs directly using the Pi SDK.
+- 💬 **Response Streaming:** Text is delivered progressively, similar to a TUI experience, with built-in API error handling.
+- 📁 **Session Context:** Chat history and tool states are persisted to disk.
+- 🛠 **Tool Support:** The agent can read files, execute bash commands, and propose file edits.
+- 🔐 **Security:** Access restricted by a whitelist of Telegram User IDs.
 
-1. Клонируйте репозиторий.
-2. Установите зависимости:
+## Installation
+
+1. Clone the repository.
+2. Install dependencies:
    ```bash
    npm install
    ```
-3. Создайте файл `.env` на основе `.env-example` и заполните его.
-4. Настройте доступные модели в `data/models.json`.
+3. Create a `.env` file based on `.env-example` and fill in the required values.
+4. Configure your available models in `data/models.json`.
 
-## Настройка моделей (`data/models.json`)
+## Model Configuration (`data/models.json`)
 
-Для каждого развернутого бота используется свой локальный файл моделей. Для добавления OpenAI-совместимого сервера используйте следующий формат:
+Each bot deployment uses its own unique local model file. To add an OpenAI-compatible server, use the following format:
 
 ```json
 {
@@ -43,32 +45,32 @@ Telegram-бот для взаимодействия с [Pi Coding Agent](https:/
 }
 ```
 
-**Важные нюансы:**
-- `api`: Должен быть `openai-responses` для совместимости с Chat Completion API.
-- `apiKey`: **Обязательное поле**. Даже если ваш сервер не требует авторизации, Pi SDK проигнорирует провайдера без этого поля.
+**Important Notes:**
+- `api`: Must be `openai-responses` for compatibility with the Chat Completion API.
+- `apiKey`: **Required field**. Even if your server doesn't require authentication, the Pi SDK will ignore the provider if this field is missing.
 
-## Запуск
+## Launch
 
 ```bash
 npm run start:bot
 ```
 
-## Команды бота
+## Bot Commands
 
-- `/code <запрос>` — Отправить запрос агенту.
-- `/stop` — Остановить текущую генерацию/выполнение инструментов.
-- `/new [путь_к_папке] [имя_сессии]` — Начать новый диалог. Можно сразу указать рабочую директорию и имя.
-- `/model <provider/model>` — Сменить модель для текущего пользователя.
-- `/models` — Список доступных моделей (сгруппирован по провайдерам).
-- `/session [id] [-f]` — Инфо о сессии (добавьте `-f` для скачивания истории файлом).
-- `/sessions` — Список последних сессий.
-- `/switch <id>` — Переключиться на существующую сессию по её ID.
-- `/projects` — Показать текущую рабочую директорию бота.
-- `/help` — Справка по командам.
+- `/code <request>` — Send a request to the agent.
+- `/stop` — Stop current generation or tool execution.
+- `/new [path_to_folder] [session_name]` — Start a new dialogue. You can optionally specify the working directory and session title.
+- `/model <provider/model>` — Change the model for the current user.
+- `/models` — List all available models (grouped by provider).
+- `/session [id] [-f]` — Get session info (add `-f` to download history as a file).
+- `/sessions` — List the most recent sessions.
+- `/switch <id>` — Switch to an existing session by its ID.
+- `/projects` — Show the bot's current working directory.
+- `/help` — Help with commands.
 
-## Хранение данных и особенности
+## Data Storage & Behavior
 
-- **Задержка сохранения:** Файлы сессий в `data/sessions/` физически создаются на диске только после того, как ассистент пришлет свой **первый ответ**. До этого момента данные (CWD, заголовок) хранятся в оперативной памяти бота.
-- `data/sessions.json` — Карта соответствия Chat ID -> Session ID.
-- `data/users.json` — Пользовательские настройки (выбранная модель).
-- `data/models.json` — Реестр моделей, специфичный для данного проекта.
+- **Persistence Delay:** Session files in `data/sessions/` are physically created on disk only after the assistant sends its **first response**. Until then, data (CWD, title) is kept in the bot's memory.
+- `data/sessions.json` — Mapping of Chat ID -> Session ID.
+- `data/users.json` — User settings (selected model).
+- `data/models.json` — Model registry specific to this project instance.
