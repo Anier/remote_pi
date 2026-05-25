@@ -3,7 +3,6 @@ import { Bot, InputFile } from "grammy"
 import { dirname, resolve, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { existsSync, readFileSync } from "node:fs"
-import { modelRegistry } from "./pi-client.js"
 import { getSession, deleteSession, setSession, getOrCreateSessionManager, findSessionFile, SESSION_DIR } from "./session-store.js"
 import { streamResponse, abortStream } from "./stream-handler.js"
 import { getUserSettings, setUserModel } from "./user-store.js"
@@ -158,43 +157,49 @@ bot.command("projects", async (ctx) => {
 bot.command("models", async (ctx) => {
   await ctx.reply("⏳ Загружаю список моделей...")
   try {
-    const allModels = modelRegistry.getAll()
-    if (!allModels || allModels.length === 0) {
-      await ctx.reply("Список моделей пуст или недоступен.")
+    const modelsPath = join(PROJECT_ROOT, "data", "models.json")
+    if (!existsSync(modelsPath)) {
+      await ctx.reply("❌ Файл data/models.json не найден.")
       return
     }
-    
-    // Группируем по провайдеру для удобства
-    const grouped = {}
-    allModels.forEach(m => {
-      if (!grouped[m.provider]) grouped[m.provider] = []
-      grouped[m.provider].push(m.id)
-    })
+    const raw = readFileSync(modelsPath, "utf-8")
+    const config = JSON.parse(raw)
 
-    let text = "📋 <b>Доступные модели:</b>\n\n"
-    for (const [provider, ids] of Object.entries(grouped)) {
+    const providers = config.providers || {}
+    const entries = Object.entries(providers)
+    if (entries.length === 0) {
+      await ctx.reply("Список моделей пуст.")
+      return
+    }
+
+    let text = "📋 <b>Локальные модели (data/models.json):</b>\n\n"
+    let isTruncated = false
+
+    for (const [provider, providerConfig] of entries) {
+      if (text.length > 3500) {
+        isTruncated = true
+        break
+      }
       text += `🔹 <b>${provider}:</b>\n`
-      ids.forEach(id => {
-        text += `  <code>${provider}/${id}</code>\n`
-      })
+      for (const model of providerConfig.models || []) {
+        const line = `  <code>${provider}/${model.id}</code>\n`
+        if (text.length + line.length > 3800) {
+          isTruncated = true
+          break
+        }
+        text += line
+      }
       text += "\n"
+      if (isTruncated) break
     }
 
-    if (text.length > 4000) {
-      let truncated = text.slice(0, 3900)
-      // Закрываем открытые теги, если они были обрезаны
-      if ((truncated.match(/<code>/g) || []).length > (truncated.match(/<\/code>/g) || []).length) {
-        truncated += "</code>"
-      }
-      if ((truncated.match(/<b>/g) || []).length > (truncated.match(/<\/b>/g) || []).length) {
-        truncated += "</b>"
-      }
-      await ctx.reply(truncated + "\n\n... (список обрезан)", { parse_mode: "HTML" })
-    } else {
-      await ctx.reply(text, { parse_mode: "HTML" })
+    if (isTruncated) {
+      text += "\n... (список обрезан)"
     }
+
+    await ctx.reply(text, { parse_mode: "HTML" })
   } catch (err) {
-    await ctx.reply("❌ Ошибка при получении списка моделей: " + err.message)
+    await ctx.reply("❌ Ошибка при чтении data/models.json: " + err.message)
   }
 })
 

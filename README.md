@@ -46,7 +46,7 @@ Each bot deployment uses its own unique local model file. To add an OpenAI-compa
 ```
 
 **Important Notes:**
-- `api`: Must be `openai-responses` for compatibility with the Chat Completion API.
+- `api`: Use `openai-completions` for Chat Completions API, or `openai-responses` for OpenAI Responses API.
 - `apiKey`: **Required field**. Even if your server doesn't require authentication, the Pi SDK will ignore the provider if this field is missing.
 
 ## Launch

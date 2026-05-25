@@ -46,7 +46,7 @@ Telegram-бот для взаимодействия с [Pi Coding Agent](https:/
 ```
 
 **Важные нюансы:**
-- `api`: Должен быть `openai-responses` для совместимости с Chat Completion API.
+- `api`: Используйте `openai-completions` для Chat Completions API или `openai-responses` для OpenAI Responses API.
 - `apiKey`: **Обязательное поле**. Даже если ваш сервер не требует авторизации, Pi SDK проигнорирует провайдера без этого поля.
 
 ## Запуск

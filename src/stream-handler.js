@@ -38,9 +38,11 @@ export async function streamResponse(chatId, prompt, bot) {
       if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
         newText = event.assistantMessageEvent.delta
       } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_delta") {
-        // optionally stream thinking delta if needed
+        newText = event.assistantMessageEvent.delta
       } else if (event.type === "bash_running") {
         newText = `\n[Запуск команды: ${event.command}]\n`
+      } else if (event.type === "toolcall_start") {
+         newText = `\n[Использование инструмента: ${event.partial?.content[event.contentIndex]?.name}]\n`
       } else if (event.type === "message_end" && event.message?.role === "assistant" && event.message.stopReason === "error") {
         newText = `\n\n❌ Ошибка от ИИ: ${event.message.errorMessage}\n`
       } else if (event.type === "error") {
